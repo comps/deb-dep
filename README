@@ -1,0 +1,95 @@
+== Intro ==
+
+This tool generates a list of deb package dependencies based on a given source
+(file/dir) tree. The idea is that you might want a "proper" package for
+a project compiled from source without having to track or guess all real
+dependencies yourself.
+It can also serve as a basic check for your handwritten dependencies, to make
+sure you didn't forget anything.
+
+There have been multiple projects/scripts like this in the past, but most
+of them didn't account for the complexity of the package manager and thus worked
+only sometimes or on simple configurations.
+
+This is not as simple as it first seems.
+
+== Key requirements / problems ==
+
+Files-vs-packages
+ - each file may be provided by none, one or multiple packages
+ - each file may (likely will) be even provided by multiple versions
+   of multiple packages
+ - OR/AND relationships might change depending on package and pkg version
+   (depending on whether the pkg version has the file)
+
+Versions
+ - each pkg can have multiple version
+ - each pkg version may be completely different (deps, ...)
+ - apt-file cannot be used, it doesn't contain origin (repo) info
+   - use libcurl, cache downloaded files, use HTTP HEAD
+ - Contents.txt.gz has no version info
+   - however you can look up the apt cache for each pkg version to see where
+     it comes from (source repo)
+   - and if you also track which Contents.txt.gz came from where, you can match
+     each file to a specific repo to a specific pkg version
+   - this allows 'version preference' on a per-file or per-pkg basis
+ - always keep version separated from pkg name
+   - for version comparison
+   - for final printing (attaching versions to an OR-list of pkgs is messy)
+
+Dep optimization / multiple pkgs providing the same file
+ - order of optimization operations important!
+ - virtual packages - instead of depending on a specific package (postfix),
+   depend on the virtual package (mail-transfer-agent) if all specific packages
+   that Provide the virtual package have the file you depend on
+   - unclear logic of how virtual packages should be used, some use Provides,
+     others do not
+ - if virtual pkg in your case doesn't exist or if not all specific packages
+   of a virtual pkg provide the same file, use OR relationship (|) between the
+   packages that provide the file
+   - be clever about ordering, look up rdepends to see which package is used
+     by most other packages, this should result in a preference of ie.
+     'libasound2' instead of 'liboss4-salsa-asound2'
+ - dependency tree optimizations
+   - multi-level transitivity - if A->B->C and A->C, we can remove A->C
+     - each level goes deeper in the dep tree, but needs to check all previous
+       levels as well (against itself)
+       - ie. A->B->C->D->E (4th level) vs A->X->E (2nd level)
+     - levels >1 applicable only if every dependency of a package on the given
+       level has *all* deps covered elsewhere in the tree
+       - ie. A->B->C->D->E vs A->X->E,
+         we can remove A->X only of all deps of X are satisfied elsewhere,
+         not just X->E (X may depend on Z, which nothing else depends on)
+
+Scanning
+ - walk using ftw(3) / nftw(3) or the fts(3) system
+   - watch for broken symlinks! (OSError: [Errno 2] No such file or directory)
+ - script detection (shebang) is fairly straightforward
+   - special cases like '/usr/bin/env python' as well
+ - parsing ELF header is unnecessary aside from initial '\x7fELF' check,
+   loaders have --verify, which is actually more reliable (and you need to
+   call it anyway)
+ - don't ever use ldd(1), it's extremely slow
+ - exporting LD_TRACE_LOADED_OBJECTS and executing the file is also BAD
+   - statically compiled files are just executed, causing various havoc or,
+     in the best case, just process hang (burnMMX)
+   - static/dynamic detection already done by loader's --verify
+   - the files might not have +x
+   --> always call the loader (argv[0]) and pass it the binary as arg
+     - first --verify, then --list
+     - try multiple loaders (/lib64/ and /lib/), quite reliable globs are
+       tips = [ "/lib64/ld-*.so*", "/lib/ld-*.so*" ]
+       - use the first one that returns positive result for --verify
+
+Printing
+ - print with (more specific) or without (more generic) pkg version
+   - start with some generic sane defaults (ie. glibc always w/ version)
+   - user-selectable on per-package basis
+   - operators? (`>=' by default, would `=' make sense?)
+ - concatenation to existing list of human-written deps?
+ - have progress/debug output for various sub-tasks
+
+Don't care about
+ - Pre-Depends, these should be always human-selected
+ - Provides of the currently scanned source tree, impossible to tell
+ - Size, Installed-Size, ..., let other tools fill that in
